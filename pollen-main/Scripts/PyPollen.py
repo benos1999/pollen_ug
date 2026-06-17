@@ -1,7 +1,9 @@
 """Module for segmenting and measuring pollen particles from images."""
 
+from functools import lru_cache
 from pathlib import Path
 import typing as t
+import pickle
 import skimage
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,11 +15,19 @@ import skimage.segmentation
 from PIL import Image, ImageEnhance
 from scipy import ndimage as nd
 from scipy import stats
-from skimage.feature import canny
-from skimage.feature import texture as sft
+from skimage.feature import canny, graycomatrix, graycoprops
 from skimage.io import imread
 from skimage.util import img_as_ubyte
-import pickle
+
+import config
+
+
+@lru_cache(maxsize=None)
+def load_error_model(model_path: t.Optional[str] = None):
+    """Loads and caches the SVM error-prediction model."""
+    path = Path(model_path) if model_path else config.MODEL_PATH
+    with open(path, "rb") as fh:
+        return pickle.load(fh)
 
 # Function to increase contast with PIL function, used throughout other functions
 def inc_contrast(
@@ -100,9 +110,13 @@ def segment(
         ),
         selem,
     )
-    # Canny edge detection filter detects object edges and outputs boolean array
+    # Canny edge detection filter detects object edges and outputs boolean array.
+    # scikit-image now requires low_threshold < high_threshold, so order them.
     elevation_map = canny(
-        devened, sigma=sigma, low_threshold=canny_lt, high_threshold=canny_ht
+        devened,
+        sigma=sigma,
+        low_threshold=min(canny_lt, canny_ht),
+        high_threshold=max(canny_lt, canny_ht),
     )
     # 3x3 structuring element so binary closing detects true values in any neighbouring pixel as a connection
     s = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
@@ -187,13 +201,14 @@ def measure_props(
     markers_sd: float = 0.25,
     use_longest_elements: bool = False,
     iterations=1,
+    model_path: t.Optional[str] = None,
 ):
     # Image opened, converted to greyscale and dimensions measured for
     # calculating image:grain ratios, which allows for different size images
     img = Image.open(path).convert("L")
     w, h = img.size
     area = w * h
-    tempdf = pd.DataFrame()
+    rows: t.List[pd.Series] = []
     a = segment(
         img,
         sigma=sigma,
@@ -239,28 +254,26 @@ def measure_props(
                 ]
             )
             # Creates GLCM and measures properties thereof, appends to DataFrame
-            glcm = sft.greycomatrix(boxx, distances, angles, levels=256, normed=True)
-            correlation = sft.greycoprops(glcm, prop="correlation")[0].mean()
-            contrast = sft.greycoprops(glcm, prop="contrast")[0].mean()
-            dissimilarity = sft.greycoprops(glcm, prop="dissimilarity")[0].mean()
-            homogeneity = sft.greycoprops(glcm, prop="homogeneity")[0].mean()
-            ASM = sft.greycoprops(glcm, prop="ASM")[0].mean()
-            energy = sft.greycoprops(glcm, prop="energy")[0].mean()
+            glcm = graycomatrix(boxx, distances, angles, levels=256, normed=True)
+            correlation = graycoprops(glcm, prop="correlation")[0].mean()
+            contrast = graycoprops(glcm, prop="contrast")[0].mean()
+            dissimilarity = graycoprops(glcm, prop="dissimilarity")[0].mean()
+            homogeneity = graycoprops(glcm, prop="homogeneity")[0].mean()
+            ASM = graycoprops(glcm, prop="ASM")[0].mean()
+            energy = graycoprops(glcm, prop="energy")[0].mean()
             entropy = sme.shannon_entropy(boxx)
-            prediction_model = pickle.load(
-                open("SVM_error_prediction_model.sav", "rb")
-            )
+            prediction_model = load_error_model(model_path)
             values = [
                 h,
                 region.area,
                 region.perimeter,
                 region.solidity,
-                region.major_axis_length,
-                region.minor_axis_length,
-                region.equivalent_diameter,
+                region.axis_major_length,
+                region.axis_minor_length,
+                region.equivalent_diameter_area,
                 region.eccentricity,
                 region.extent,
-                region.filled_area,
+                region.area_filled,
                 region.euler_number,
                 entropy,
                 contrast,
@@ -302,10 +315,10 @@ def measure_props(
                     [
                         region.area,
                         region.eccentricity,
-                        region.equivalent_diameter,
+                        region.equivalent_diameter_area,
                         region.extent,
-                        region.major_axis_length,
-                        region.minor_axis_length,
+                        region.axis_major_length,
+                        region.axis_minor_length,
                         region.perimeter,
                         ASM,
                         contrast,
@@ -320,16 +333,16 @@ def measure_props(
             )
             # print(value)
             if value == 0:
-                tempdf = tempdf.append(series)
+                rows.append(series)
             else:
                 continue
         else:
             continue
-    if tempdf.empty:
-        return tempdf
-    # elif tempdf["Area"].size > 2:
-    #   tempdf = tempdf[(np.abs(stats.zscore(tempdf["Area"])) < 1.5)]
-    #  tempdf["thresh_factor"] = tempdf["Area"].min() / tempdf["Area"].max()
+    if not rows:
+        return pd.DataFrame()
+    tempdf = pd.DataFrame(rows)
+    # tempdf = tempdf[(np.abs(stats.zscore(tempdf["Area"])) < 1.5)]
+    # tempdf["thresh_factor"] = tempdf["Area"].min() / tempdf["Area"].max()
     # tempdf = tempdf.loc[tempdf["thresh_factor"] > 0.3].drop("thresh_factor", axis=1)
     return tempdf
 
@@ -376,28 +389,11 @@ def get_props(
 
 # Function to show transformations at each stage of measure_props for each image in dataset
 def plot_analysis_on_images(inputfolder: Path):
-    measuresdf = pd.DataFrame(
-        columns=[
-            "Area",
-            "Perimeter",
-            "Major_axis_length",
-            "Minor_axis_length",
-            "Equivalent_diameter",
-            "Eccentricity",
-            "Extent",
-            "Contrast",
-            "Dissimilarity",
-            "Homogeneity",
-            "ASM",
-            "Energy",
-            "Correlation",
-            "Bounding_box",
-        ]
-    )
+    measures: t.List[pd.DataFrame] = []
     for i, path in enumerate(inputfolder.glob("*.jpg")):
         uint_img = imread(path, as_gray=True)
         output = get_props(path)
-        measuresdf = measuresdf.append(output)
+        measures.append(output)
         # Matplotlib configurations to show 5 images of different stages of the process
         inp = Image.open(path).convert("L")
         plt.fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(
@@ -467,14 +463,14 @@ def plot_analysis_on_images(inputfolder: Path):
 def optimise_segmentation_variables(inputfolder, test_mask_thresholding=False):
     # DataFrame containing magnifications, size in micrometers, and actual number of grains in image
     actualcount = pd.read_csv(
-        "true_values.csv",
+        config.TRUE_VALUES_PATH,
         names=["Image", "count", "size", "mag"],
         index_col="Image",
     )
     actualcountdf = pd.DataFrame(actualcount)
     # Each input variable is run through a range of values
     for path in inputfolder.glob("*.jpg"):
-        size_efficacydf = pd.DataFrame(columns=["accuracy", "SD_diff"])
+        size_rows: t.List[pd.Series] = []
         for sigma in np.linspace(1, 4, num=12):
             for canny_lt in np.linspace(20, 70, num=10):
                 for canny_ht in np.linspace(1, 21, num=5):
@@ -507,9 +503,7 @@ def optimise_segmentation_variables(inputfolder, test_mask_thresholding=False):
                                             f"{sigma},{canny_lt},{canny_ht},{evened_contrast_times},{dilated_contrast_times},{dilated_evened_selem_size},{dilation_selem_size}"
                                         ),
                                     )
-                                    size_efficacydf = size_efficacydf.append(
-                                        size_series
-                                    )
+                                    size_rows.append(size_series)
                                 # The size, magnification and actual cumber of grains in the image are input manually.
                                 # Double validation - must match the size and pass filters to be considered a grain,
                                 # then count calculated as percentage of actual grains in the image
@@ -563,13 +557,10 @@ def optimise_segmentation_variables(inputfolder, test_mask_thresholding=False):
                                     )
                                     # Appended to full DataFrame containing % efficacy for each grain,
                                     # with each index containing the combination of input variables
-                                    size_efficacydf = size_efficacydf.append(
-                                        size_series
-                                    )
-        size_efficacydf.to_csv(f"size_{path.stem}.csv")
+                                    size_rows.append(size_series)
+        pd.DataFrame(size_rows).to_csv(f"size_{path.stem}.csv")
 
 
 if __name__ == "__main__":
-    # Global variables
-    inputfolder = Path("Saps excuded/Included SAPS")
-    plot_analysis_on_images(inputfolder)
+    # Input image folder; override with the PYPOLLEN_INPUT_FOLDER env var.
+    plot_analysis_on_images(config.INPUT_FOLDER)

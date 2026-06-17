@@ -1,6 +1,6 @@
-"""paldat_scraper.py
+"""GPP_scraper.py
 
-A modular, professional-style scraper for paldat.org converted from the notebook.
+A modular scraper for the Global Pollen Project converted from the notebook.
 
 Features:
 - requests.Session with retries and timeouts
@@ -24,7 +24,7 @@ import scrape_utils
 
 logger = logging.getLogger(__name__)
 
-def download_images(link: str, outdir: str, id_counter: int, out_json: str = "C:\\Users\\pinto\\py_stuff\\pollen-main\\pollen-main\\Web Scraping\\output\\gpp_out.json"):
+def download_images(link: str, outdir: str, id_counter: int, out_json: str = os.path.join("output", "gpp_out.json")):
     os.makedirs(outdir, exist_ok=True)
     
     if os.path.exists(out_json):
@@ -77,7 +77,7 @@ def download_images(link: str, outdir: str, id_counter: int, out_json: str = "C:
     return id_counter
 
 
-def run(out_json: str = 'C:\\Users\\pinto\\py_stuff\\pollen-main\\pollen-main\\Web Scraping\\output\\gpp_out.json', out_csv: str = 'C:\\Users\\pinto\\py_stuff\\pollen-main\\pollen-main\\Web Scraping\\output\\gpp_out.csv', download_images_flag: bool = True,
+def run(out_json: str = os.path.join("output", "gpp_out.json"), out_csv: str = os.path.join("output", "gpp_out.csv"), download_images_flag: bool = True,
         images_dir: str = 'GPP_images', sleep_min: float = 1.0, sleep_max: float = 3.0):
     session = scrape_utils.make_session()
     # base = 'https://api.globalpollenproject.org'
@@ -115,8 +115,8 @@ def run(out_json: str = 'C:\\Users\\pinto\\py_stuff\\pollen-main\\pollen-main\\W
 def cli_main():
     p = argparse.ArgumentParser(description='GPP scraper')
     p.add_argument('--no-images', action='store_true', help='Do not download images')
-    p.add_argument('--out-json', default='C:\\Users\\pinto\\py_stuff\\pollen-main\\pollen-main\\Web Scraping\\output\\gpp_out.json')
-    p.add_argument('--out-csv', default='C:\\Users\\pinto\\py_stuff\\pollen-main\\pollen-main\\Web Scraping\\output\\gpp_out.csv')
+    p.add_argument('--out-json', default=os.path.join("output", "gpp_out.json"))
+    p.add_argument('--out-csv', default=os.path.join("output", "gpp_out.csv"))
     p.add_argument('--images-dir', default='GPP_images')
     p.add_argument('--min-sleep', type=float, default=1.0)
     p.add_argument('--max-sleep', type=float, default=3.0)
